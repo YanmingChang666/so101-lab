@@ -1,197 +1,190 @@
-# SO-101 Lab
+# SO-101 Lab — Personal Notes
 
-> Train manipulation policies for the SO-101 robot arm — from teleoperated demos in Isaac Sim to RL fine-tuning and real robot deployment (in development).
-
-<p>
-  <img alt="Python 3.11 | 3.12" src="https://img.shields.io/badge/python-3.11%20|%203.12-blue">
-  <img alt="Isaac Sim 5.1" src="https://img.shields.io/badge/Isaac%20Sim-5.1-76B900?logo=nvidia">
-  <img alt="LeRobot 0.5.1" src="https://img.shields.io/badge/LeRobot-0.5.1-FFD21E?logo=huggingface">
-  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
-</p>
+> Personalized quick-start guide for **this machine**. For the full upstream project docs (architecture, every script, results tables, attribution), see [docs/](docs/) — this file trades completeness for "what do I actually type."
 
 ---
 
-## Changelog
+## 1. What this project is
 
-### 2026-03-22 — Medium task results corrected
+Train manipulation policies for the SO-101 arm entirely in simulation, then optionally deploy to the real robot:
 
-The gRPC eval architecture (separate Python 3.11/3.12 processes for Isaac Sim and LeRobot) had a bug in `smolvla_server.py`: the task language instruction was not passed to SmolVLA — the model received an empty string instead of the actual task description. All SmolVLA-based medium task results have been re-evaluated with the fix ([`7cdae2d`](https://github.com/MSSergeev/so101-lab/commit/7cdae2d)). Easy task results were collected before the gRPC migration and are unaffected.
-
----
-
-## Capabilities
-
-- **LeRobot dataset from Isaac Sim** — record teleoperated demonstrations in simulation, save as LeRobot v3.0 format (parquet + H.264 video)
-- **Isaac Lab environments** — task environments with spawn zones, domain randomization, and configurable sim rewards
-- **SmolVLA fine-tuning research** — IQL advantage-weighted BC, Flow-Noise PPO for flow matching, learned initial noise sampler
-- **Multiple RL approaches** — IQL (offline), Flow-Noise PPO (online, on-policy), SAC (online, off-policy, *in progress*)
-- **VIP reward model** — dense reward labeling from ResNet50 Ego4D embeddings, no manual reward engineering
-- **Sim-to-real pipeline** — calibrated cameras, domain randomization (light, physics, camera noise, distractors)
-- **Ready-made scene assets** — children's shape sorting game (cube, star, hexagon, cylinder, etc.) as USD props for Isaac Sim pick-and-place tasks
-
-**Want to try it right away?** Download a [demo dataset + trained checkpoint](docs/workflow/00a_try_demo.md) and run eval in minutes.
-
-**Want to record a task in Isaac Sim and train a policy?** Follow the [step-by-step workflow](docs/workflow/).
-
----
-
-## Demo
-
-Same scene, same seed — three methods compared side-by-side:
-
-![Eval comparison: BC (fail), PPO (fail), IQL (success)](docs/media/eval_comparison.gif)
-
-| SmolVLA BC | SmolVLA + PPO | SmolVLA + IQL |
-|:---:|:---:|:---:|
-| fail | fail | success |
-
-<sub>Medium spawn zone, episode seed 383735588, no domain randomization.</sub>
-
-<details>
-<summary>Teleoperation (leader arm → sim)</summary>
-
-![Teleoperation with all figures](docs/media/teleop_full_game.gif)
-
-![Teleoperation with SO-101 leader arm](docs/media/teleop.gif)
-
-</details>
-
----
-
-## Results
-
-### Easy task
-
-`figure_shape_placement_easy` — 200 teleoperated episodes, small spawn zone.
-
-| Method | Success rate |
-|--------|:-----------:|
-| ACT | 56% |
-| Diffusion Policy | 0% |
-| SmolVLA BC | 70–76% |
-| SmolVLA + IQL weighted BC | 86–88% |
-| SmolVLA + Learned Sampler + PPO | **90%** |
-
-### Medium task
-
-`figure_shape_placement` — 300 episodes, 4× spawn area.
-
-| Method | Success rate | vs BC |
-|--------|:-----------:|:-----:|
-| SmolVLA BC | 45% | — |
-| SmolVLA + IQL weighted BC | **48%** | +3% |
-| SmolVLA + PPO | 30% | −15% |
-
-<sub>50 eval episodes (easy) / 600 episodes (medium), shared seed. Details: [easy task](docs/results/easy_task.md) · [medium task](docs/results/medium_task.md)</sub>
-
----
-
-## Quick start
-
-### 1. Setup
-
-```bash
-cp .env.example .env   # configure venv paths
-
-# Isaac Lab env (sim, eval, RL training)
-eval "$(./activate_isaaclab.sh)"
-pip install -e .
-
-# LeRobot env (BC/VLA training, IQL critics)
-eval "$(./activate_lerobot.sh)"
-pip install -e ".[hardware]"
+```
+teleoperate in Isaac Sim  →  record LeRobot-format dataset  →  train BC policy (ACT / Diffusion / SmolVLA)
+                                                              →  eval in sim
+                                                              →  (optional) RL fine-tune (IQL offline / PPO online)
+                                                              →  deploy on real SO-101
 ```
 
-<sub>Full setup: [docs/workflow/00_setup.md](docs/workflow/00_setup.md) · Why four venvs: [docs/architecture.md](docs/architecture.md#virtual-environments)</sub>
+Task scene: a children's shape-sorting toy (cube, star, hexagon, cylinder, ...) on a workbench. The robot has to pick a shape and place it in a target zone. Two difficulty presets exist as separate task envs:
+- `figure_shape_placement_easy` — small spawn zone, start here
+- `figure_shape_placement` — 4x spawn area, harder
 
-### 2. Record → Train → Evaluate
+Reference success rates from the upstream project (SmolVLA + IQL): 86–88% on easy, 48% on medium. Plain BC (ACT) alone: ~56%.
+
+---
+
+## 2. Environments on this machine
+
+The project needs **two incompatible Python environments** because Isaac Sim pins Python 3.11 and LeRobot 0.5.1 requires Python 3.12. Tool venvs are optional extras.
+
+| Role | What to use on this machine | Python | Status |
+|---|---|---|---|
+| **isaaclab-env** (sim, teleop, RL env loop, eval) | conda env **`isaac5.1-so-arm101`** | 3.11.15 | ✅ already has Isaac Sim 5.1.0.0 + Isaac Lab 2.3.0 + torch 2.7.0+cu128 — reused as-is, no need to build a fresh venv |
+| **lerobot-env** (ACT/Diffusion/SmolVLA training, IQL critics) | a plain `python3.12 -m venv` (not conda, not uv — none required) | 3.12 | needs to be created, see below |
+| `venvs/rerun` | dataset visualization (rerun-sdk) | any | optional |
+| `venvs/viewer` | live camera preview during recording | any | optional |
+
+**Note:** `uv` is *not* required anywhere — it's just what the upstream docs use for speed. Plain `pip`/`venv`/`conda` work identically; nothing in `pyproject.toml` depends on uv.
+
+**Note:** `activate_isaaclab.sh` assumes a venv with `bin/activate`, which the conda env doesn't have. Don't use it — just `conda activate isaac5.1-so-arm101` directly.
+
+### Activating
 
 ```bash
-# Record episodes (isaaclab-env)
+# isaaclab-env
+conda activate isaac5.1-so-arm101
+cd /home/cym/ROS/Arms/isaac_so_arm101/so101-lab
+
+# lerobot-env (once created — see setup below)
+source ~/venvs/lerobot-env/bin/activate
+cd /home/cym/ROS/Arms/isaac_so_arm101/so101-lab
+```
+
+---
+
+## 3. Setup already done in `isaac5.1-so-arm101`
+
+These were missing the first time `record_episodes.py` was run and have been installed:
+
+```bash
+conda activate isaac5.1-so-arm101
+pip install -e .
+pip install pyarrow av datasets huggingface_hub accelerate num2words safetensors \
+            cma nvidia-ml-py pyserial deepdiff feetech-servo-sdk diffusers
+pip install "click==8.1.7"   # pinned — see gotcha below
+```
+
+### Gotcha: click version pin
+Installing the packages above upgrades `click` past `8.1.7`, which conflicts with `isaacsim-kernel`'s exact pin (`click==8.1.7`) and can break Isaac Sim. It has been pinned back. **Side effect:** `typer` (and therefore `trackio`) cannot be imported in this env — this matches the upstream-documented limitation that **trackio only works in lerobot-env**. In isaaclab-env, always pass `--tracker wandb` or `--tracker none` to scripts, never `--tracker trackio`.
+
+### lerobot-env — not yet created
+```bash
+python3.12 -m venv ~/venvs/lerobot-env
+source ~/venvs/lerobot-env/bin/activate
+pip install --upgrade pip
+git clone https://github.com/huggingface/lerobot.git ~/lerobot   # need 0.5.1+
+cd ~/lerobot && pip install -e .
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+cd /home/cym/ROS/Arms/isaac_so_arm101/so101-lab
+pip install -e ".[hardware]"
+pip install trackio nvidia-ml-py
+```
+
+Then fill in `.env` (copy from `.env.example`) with:
+```
+LEROBOT_ENV=/home/cym/venvs/lerobot-env
+LEROBOT_SRC=/home/cym/lerobot/src
+```
+(`ISAACLAB_ENV` isn't usable with conda — just `conda activate isaac5.1-so-arm101` manually instead of using `act-isaac`.)
+
+### Hardware check
+GPU: RTX 4090, 24 GB VRAM — comfortably above the 8 GB minimum. `cmake` is the apt version (required, not snap).
+
+---
+
+## 4. Day-to-day workflow
+
+### Record a dataset (isaaclab-env)
+```bash
+conda activate isaac5.1-so-arm101
+
+# keyboard (no physical robot needed) — do NOT use --headless, keyboard capture needs the Isaac Sim window
 python scripts/teleop/record_episodes.py \
     --output data/recordings/my_task_v1 \
     --env figure_shape_placement_easy \
-    --headless --teleop-device=so101leader \
-    --calibration-file=leader_1.json --port=/dev/ttyACM0
+    --teleop-device=keyboard
 
-# Train ACT (lerobot-env)
+# with a real SO-101 leader arm
+python scripts/teleop/record_episodes.py \
+    --output data/recordings/my_task_v1 \
+    --env figure_shape_placement_easy \
+    --teleop-device=so101leader --calibration-file=leader_1.json --port=/dev/ttyACM0 \
+    --reward-mode success
+```
+
+Or skip recording and grab the official demo dataset + checkpoint:
+```bash
+python scripts/tools/download_demo.py --dataset easy --checkpoint easy
+```
+
+### Train a BC policy (lerobot-env)
+```bash
+source ~/venvs/lerobot-env/bin/activate
 python scripts/train/train_act.py \
     --dataset data/recordings/my_task_v1 \
-    --config configs/policy/act/baseline.yaml --name act_v1
+    --config configs/policy/act/baseline.yaml \
+    --name act_v1 --tracker wandb
+```
 
-# Evaluate (isaaclab-env)
+### Evaluate in sim (isaaclab-env)
+```bash
+conda activate isaac5.1-so-arm101
 python scripts/eval/eval_act_policy.py \
     --checkpoint outputs/act_v1 \
-    --env figure_shape_placement_easy --episodes 50 --headless
+    --env figure_shape_placement_easy \
+    --episodes 20 --max-steps 500 --headless
 ```
 
-<sub>Full workflow: [docs/workflow/](docs/workflow/) · End-to-end guide: [docs/guide.md](docs/guide.md)</sub>
-
-![Pipeline overview](docs/diagrams/pipeline.png)
+### RL fine-tuning (optional, bigger success-rate jump)
+See [docs/workflow/04_offline_rl.md](docs/workflow/04_offline_rl.md) (IQL, recommended first) and [docs/workflow/05_online_rl.md](docs/workflow/05_online_rl.md) (PPO).
 
 ---
 
-## Project structure
+## 5. Keyboard teleop controls
 
-```
-so101_lab/                  # Library
-  assets/                   #   Robot and scene configs (SO-101 URDF/USD, workbench)
-  tasks/                    #   Isaac Lab environments (template, pick_cube, figure_shape_*)
-  devices/                  #   Teleoperation devices (keyboard, gamepad, SO-101 leader arm)
-  data/                     #   Dataset recording (LeRobot v3.0 format)
-  policies/                 #   Inference wrappers: act/, diffusion/, rl/
-  rewards/                  #   Reward models (VIP, classifier)
-  rl/                       #   Isaac Lab RL components (gym wrapper, domain rand)
-  transport/                #   gRPC for cross-venv communication (isaaclab ↔ lerobot)
-  utils/                    #   Shared utilities
+Recording script prints this table at startup. Control is **Cartesian delta of the gripper** (not raw joint angles) for most keys — `A`/`D` and `U`/`O` are direct joint control.
 
-scripts/                    # Runnable scripts (teleop, eval, train, tools)
-tests/                      # Unit tests (pytest, no Isaac Sim)
-tests/sim/                  # Manual functional tests (require Isaac Sim)
-configs/                    # Policy training configs (YAML)
-docs/                       # Documentation
-```
-
-<sub>Detailed layout: [docs/reference/structure.md](docs/reference/structure.md)</sub>
-
----
-
-## Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Simulator | NVIDIA Isaac Sim 5.1 + Isaac Lab 2.3.0 |
-| Robot | SO-101 (6-DOF, Feetech STS3215 servos) |
-| Policies | ACT, Diffusion Policy, SmolVLA |
-| RL | IQL, Flow-Noise PPO, SAC |
-| Rewards | VIP (ResNet50, Ego4D), binary classifier, sim rewards |
-| Dataset | LeRobot v3.0 (parquet + H.264 video) |
-| Transport | gRPC (Python 3.11 ↔ 3.12 bridge) |
-
----
-
-## Documentation
-
-| | |
+| Key | Action |
 |---|---|
-| **[Guide](docs/guide.md)** | End-to-end workflow by task |
-| **[Workflow](docs/workflow/)** | Step-by-step: setup → record → train → eval → deploy |
-| **[Architecture](docs/architecture.md)** | System design, venv split, data format |
-| **[Reference](docs/reference/index.md)** | Every script and module |
-| **[Troubleshooting](docs/troubleshooting.md)** | Common issues and fixes |
-| **[Results](docs/results/)** | Experiment results and analysis |
+| `Space` | start teleop (**do this first**, nothing else works until you do) |
+| `N` | start recording this episode |
+| `F` | finish + save episode |
+| `R` | restart (reset, same scene) |
+| `X` | discard episode, reset |
+| `T` | debug info |
+| `Escape` | quit |
+| `W` / `S` | gripper forward / backward |
+| `A` / `D` | base rotate left / right (shoulder_pan joint) |
+| `Q` / `E` | gripper up / down |
+| `I` / `K` | pitch up / down |
+| `J` / `L` | yaw left / right |
+| `U` / `O` | gripper open / close |
+
+Keys are **hold-to-move, release-to-stop** (not click-to-nudge). Tune speed with `--sensitivity <float>` (default 1.0). Window focus must be on the Isaac Sim viewport, not the terminal.
+
+Typical loop: `Space` → move around to warm up → `X`/`R` to reset if needed → `N` → perform the pick-and-place → `F` to save (or `X` to discard) → repeat 50–200x → `Escape`.
 
 ---
 
-## Attribution
+## 6. Known issues on this setup
 
-Built on [LeRobot](https://github.com/huggingface/lerobot) and [leisaac](https://github.com/LightwheelAI/leisaac). Key methods and ideas:
+| Symptom | Cause | Fix |
+|---|---|---|
+| `ModuleNotFoundError: No module named 'pyarrow'` (or `av`, `datasets`) | isaaclab-env additional packages step (setup doc §3) wasn't done | installed, see §3 above |
+| `[WARNING] Viewer venv not found` | `venvs/viewer` optional tool env not created | harmless, ignore, or `python3 -m venv venvs/viewer && source venvs/viewer/bin/activate && pip install opencv-python numpy` |
+| `trackio`/`typer` import fails in isaaclab-env | `click` pinned to 8.1.7 for Isaac Sim compatibility | expected — use `--tracker wandb`/`none` in isaaclab-env, `--tracker trackio` only in lerobot-env |
+| Keyboard controls don't respond | ran with `--headless`, no window to receive key events; or forgot `Space` first | drop `--headless` for keyboard teleop; press `Space` before other keys |
 
-- **IQL** — Kostrikov et al. 2022 ([arxiv 2110.06169](https://arxiv.org/abs/2110.06169)) — offline critic training
-- **SAC** — Haarnoja et al. 2018 ([arxiv 1801.01290](https://arxiv.org/abs/1801.01290)) — online RL, RLPD pattern (Ball et al. 2023)
-- **VIP** — Ma et al. 2023 ([github](https://github.com/facebookresearch/vip)) — dense reward labeling
-- **GreenVLA** — [arxiv 2602.00919](https://arxiv.org/abs/2602.00919) — IQL advantage-weighted BC, learned noise sampler
-- **ReinFlow** — Zhang et al. 2025 ([arxiv 2505.22094](https://arxiv.org/abs/2505.22094)) — flow-noise PPO for flow matching policies
-- **DPPO** — Ren et al. 2024 ([arxiv 2409.00588](https://arxiv.org/abs/2409.00588), ICLR 2025) — PPO for denoising-based policies
+For anything not covered here: [docs/troubleshooting.md](docs/troubleshooting.md).
 
-<sub>Full details: [docs/attribution.md](docs/attribution.md)</sub>
+---
+
+## 7. Where to go deeper
+
+| Need | File |
+|---|---|
+| Task-oriented how-to ("I want to record / train / eval / deploy") | [docs/guide.md](docs/guide.md) |
+| Full step-by-step workflow | [docs/workflow/](docs/workflow/) |
+| Why 4 venvs, data format, timing | [docs/architecture.md](docs/architecture.md) |
+| Every script's flags | [docs/reference/index.md](docs/reference/index.md) |
+| Experiment results detail | [docs/results/](docs/results/) |
