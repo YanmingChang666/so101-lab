@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Verify dataset compatibility with LeRobot v3.0 API."""
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：数据检查入口：下载或录制完成后先运行。
+# 运行环境与输入：lerobot-env；位置参数为数据集根目录。
+# 输出与下游：打印目录、元数据、LeRobot 加载和首样本读取情况。
+# 关键逻辑与边界：检查可读性不等于审核全部示范质量；继续用 visualize_lerobot_rerun.py 查看动作。
+
 import argparse
 import json
 from pathlib import Path

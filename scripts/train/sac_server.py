@@ -8,6 +8,13 @@ Usage:
     python scripts/train/sac_server.py --port 8082
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：SAC 模型服务端：管理策略、回放缓冲与更新。
+# 运行环境与输入：lerobot-env；由 train_sac_composite_grpc.py 发送初始化与交互请求。
+# 输出与下游：维护离线/在线 replay buffer、奖励模型、优化器和 SAC 检查点。
+# 关键逻辑与边界：SAC 从回放缓冲采样更新，与 PPO 按 rollout 更新的机制不同。
+#     观测和动作跨进程通信时要保持归一化约定一致。
+
 import json
 import logging
 import os

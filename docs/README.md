@@ -12,6 +12,8 @@ This is the reference index. For task-oriented instructions (how to record, trai
 
 ## Experiment workflow
 
+- [训练流程与程序顺序（中文）](workflow/training_pipeline_cn.md) — 程序顺序、输入输出、运行环境和可选算法分支。
+
 Step-by-step account of running the full pipeline on `figure_shape_placement_easy` — what was done, what parameters were used, what worked and what didn't.
 
 | File | Covers |

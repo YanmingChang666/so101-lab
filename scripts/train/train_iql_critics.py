@@ -23,6 +23,13 @@ Usage:
         --reward-normalize
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：SmolVLA 离线优化第二步：只训练 Q/V 价值网络。
+# 运行环境与输入：lerobot-env；输入带 next.reward 的数据集，输出 critics 检查点。
+# 输出与下游：先缓存图像特征，再训练 V、双 Q 及其目标网络；后续交给 compute_iql_weights.py。
+# 关键逻辑与边界：V 使用 expectile 回归，Q 使用奖励与下一状态 V 构造目标；本脚本不更新 SmolVLA。
+#     图像缓存与数据帧顺序必须一致；数据修改后不能直接沿用旧缓存。
+
 import argparse
 import json
 import os
@@ -264,6 +271,7 @@ def main():
     with open(os.path.join(args.output, "train_config.json"), "w") as f:
         json.dump(vars(args), f, indent=2)
 
+    # 先缓存冻结图像编码器特征，后续大量梯度更新无需重复解码视频和运行视觉骨干。
     # 1. Cache image embeddings (one-time, ~15-30 min for 194k frames)
     cache_path = os.path.join(args.dataset, f"{args.encoder}_embeddings.pt")
     embeddings = cache_image_embeddings(args.dataset, cache_path, encoder_type=args.encoder)
@@ -337,6 +345,7 @@ def main():
         rewards = batch["reward"].cuda()
         dones = batch["done"].cuda()
 
+        # 用非对称平方损失拟合价值；正负误差权重不同，使 V 偏向较高价值动作。
         # --- V-loss: expectile regression ---
         with torch.no_grad():
             q1_tgt = q1_target(emb, states, actions).squeeze(-1)

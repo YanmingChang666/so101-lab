@@ -5,6 +5,13 @@ Usage:
     python scripts/eval/smolvla_server.py --port 8080 --host 127.0.0.1
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：SmolVLA 双进程评估的模型服务端。
+# 运行环境与输入：lerobot-env；先启动服务，再启动 Isaac 环境的 eval_vla_policy.py。
+# 输出与下游：接收客户端观测及初始化配置，返回模型预测的动作序列。
+# 关键逻辑与边界：服务端管理模型与处理器，客户端负责物理仿真。这里提供推理而非训练，
+#     不要与 PPO 的 ppo_server.py 或 SAC 的 sac_server.py 混用。
+
 import io
 import logging
 import pickle  # nosec
@@ -17,8 +24,8 @@ import numpy as np
 import torch
 
 from lerobot.policies.factory import get_policy_class, make_pre_post_processors
-from lerobot.transport import services_pb2, services_pb2_grpc  # type: ignore
-from lerobot.transport.utils import receive_bytes_in_chunks, send_bytes_in_chunks
+from so101_lab.transport import services_pb2, services_pb2_grpc
+from so101_lab.transport.utils import receive_bytes_in_chunks, send_bytes_in_chunks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("smolvla_server")
@@ -95,9 +102,7 @@ class SimPolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         return services_pb2.Empty()
 
     def SendObservations(self, request_iterator, context):  # noqa: N802
-        raw = receive_bytes_in_chunks(
-            request_iterator, None, self.shutdown_event, logger
-        )
+        raw = receive_bytes_in_chunks(request_iterator)
         if raw is None:
             return services_pb2.Empty()
 

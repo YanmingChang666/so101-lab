@@ -13,6 +13,13 @@ Then run eval:
         --episodes 20
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：SmolVLA 等 VLA 策略的仿真评估客户端。
+# 运行环境与输入：isaac5.1-so-arm101；输入 --checkpoint、任务环境及任务文本。
+# 输出与下游：向独立服务发送观测，从返回动作驱动仿真并统计成功率。
+# 关键逻辑与边界：先运行 lerobot-env 中的 smolvla_server.py，或配置自动启动。
+#     比较微调前后模型时保持种子、任务文本、动作执行步数和域随机化设置一致。
+
 # Section 1: argparse + AppLauncher
 import argparse
 from isaaclab.app import AppLauncher

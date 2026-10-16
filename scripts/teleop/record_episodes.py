@@ -55,6 +55,13 @@ Sim reward terms are auto-discovered from so101_lab/tasks/<env>/rl/mdp/rewards.p
 If the module doesn't exist, sim/sim+success modes are unavailable.
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：数据准备的另一入口：人工遥操作采集示范。
+# 运行环境与输入：isaac5.1-so-arm101；输入任务 --env、控制设备和输出目录。
+# 输出与下游：输出 LeRobot v3 数据：相机视频、关节状态、动作，以及可选 next.reward。
+# 关键逻辑与边界：状态机区分空闲、遥操作和录制。动作执行前保存观测与动作，执行后补写奖励，
+#     避免把动作后的图像错误地当作输入。采集后先检查和可视化，再训练。
+
 import argparse
 import sys
 from enum import Enum
@@ -384,6 +391,7 @@ def main():
             sys.exit(1)
         # sim_rewards.pt is always saved when reward_funcs are available, regardless of reward_mode
 
+    # 创建 LeRobot 写入器：将连续图像编码成视频，将状态和动作写为表格。
     # Create dataset writer
     extra_features = {}
     if use_rewards:
@@ -415,6 +423,7 @@ def main():
         viewer_proc = launch_viewer()
         preview_active = viewer_proc is not None
 
+    # 区分“可以操控”和“正在录制”，练习动作不会自动进入训练数据。
     # State machine
     state = State.IDLE
     waiting_for_auto_start = False
@@ -773,6 +782,7 @@ def main():
                 if action_dict and not action_dict.get("reset"):
                     action = env.cfg.preprocess_device_action(action_dict, device)
 
+                    # 必须先保存 (当前观测, 即将执行的动作)，再推进物理仿真。
                     # ЗАПИСЬ ПЕРЕД STEP - правильная семантика (obs_before, action)
                     if state == State.RECORDING:
                         recorder.on_step(obs_dict, action)
@@ -788,6 +798,7 @@ def main():
                             episode_success_achieved = True
                             print(f"[SUCCESS] Task completed at frame {episode_frame_count}!")
 
+                    # 奖励描述动作造成的结果，因此执行后计算，再回填刚保存的 transition。
                     # Compute and attach reward AFTER step (if enabled)
                     if use_rewards and state == State.RECORDING:
                         # Always compute sim metrics if available (saved to sim_rewards.pt)

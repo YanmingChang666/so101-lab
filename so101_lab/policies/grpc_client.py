@@ -12,25 +12,11 @@ import io
 import numpy as np
 
 
-def _get_lerobot_src() -> str:
-    if src := os.environ.get("LEROBOT_SRC"):
-        return os.path.expanduser(src)
-    env_file = Path(__file__).parents[2] / ".env"
-    if env_file.exists():
-        for line in env_file.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("LEROBOT_SRC="):
-                return os.path.expanduser(line.split("=", 1)[1].strip())
-    raise RuntimeError("LEROBOT_SRC not set. Add it to .env or set the environment variable.")
-
-
-_lerobot_src = _get_lerobot_src()
-if _lerobot_src not in sys.path:
-    sys.path.insert(0, _lerobot_src)
-
-import grpc  # noqa: E402
-from lerobot.transport import services_pb2, services_pb2_grpc  # type: ignore  # noqa: E402
-from lerobot.transport.utils import send_bytes_in_chunks, grpc_channel_options  # noqa: E402
+# 本地协议用 grpcio-tools==1.62.3 生成，兼容 Isaac 的 Protobuf 4.25。
+# 推理客户端无需导入 Python 3.12 环境中的 LeRobot 包。
+import grpc
+from so101_lab.transport import services_pb2, services_pb2_grpc
+from so101_lab.transport.utils import send_bytes_in_chunks, grpc_channel_options
 
 
 class GrpcPolicyClient:

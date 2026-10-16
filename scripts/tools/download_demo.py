@@ -18,6 +18,13 @@ Usage:
 Requires: lerobot-env (huggingface_hub, lerobot)
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：数据准备入口：下载官方示范或已有策略。
+# 运行环境与输入：lerobot-env；输入 --dataset easy/medium/all 或 --checkpoint easy。
+# 输出与下游：数据写入 data/recordings/，权重写入 outputs/；具体映射见 DATASETS/CHECKPOINTS。
+# 关键逻辑与边界：目标目录非空就跳过，不验证完整性；之后运行 verify_lerobot_dataset.py。
+#     下载数据与自行录制二选一；下载 SmolVLA 权重也可以跳过训练直接评估。
+
 import argparse
 import sys
 from pathlib import Path

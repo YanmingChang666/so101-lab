@@ -22,6 +22,13 @@ Usage:
         --output-dataset /tmp/test_rollouts --gui
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：可选自动数据采集：用脚本 IK 策略生成轨迹。
+# 运行环境与输入：isaac5.1-so-arm101；输入任务、episode 数、随机化设置和输出目录。
+# 输出与下游：输出 LeRobot 数据和 sim_rewards.pt，可用于离线 RL 或 SAC 初始化。
+# 关键逻辑与边界：虽然位于 eval/，主要用途是生成数据；自动轨迹也要检查成功率和质量。
+#     这是人工遥操作之外的数据来源，不是所有模仿学习流程的必需步骤。
+
 import argparse
 import sys
 

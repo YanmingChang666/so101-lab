@@ -1,5 +1,7 @@
 // gRPC service for SAC training: isaaclab-env client ↔ lerobot-env server.
 //
+// Generate with grpcio-tools==1.62.3 in a separate build environment.
+// This keeps the generated code compatible with Isaac's protobuf 4.25.x runtime.
 // To regenerate Python stubs:
 //   python -m grpc_tools.protoc -I . --python_out=. --grpc_python_out=. so101_lab/transport/sac.proto
 

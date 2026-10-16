@@ -31,6 +31,13 @@ Controls (Isaac Sim window or eval_viewer.py):
     Escape - Quit evaluation
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：Diffusion 训练后的仿真评估分支。
+# 运行环境与输入：isaac5.1-so-arm101；输入 Diffusion 检查点与对应任务环境。
+# 输出与下游：输出闭环执行的成功率与评估记录。
+# 关键逻辑与边界：需要历史观测及动作队列；推理去噪步数影响速度与效果。
+#     本脚本是 train_diffusion.py 的下游，不是 ACT 之后必须运行的阶段。
+
 import argparse
 import sys
 

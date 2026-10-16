@@ -10,6 +10,13 @@ Usage:
         --noise-dims 32 --batch-size 4
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：可选分支：为已有 SmolVLA 训练状态相关的初始噪声采样器。
+# 运行环境与输入：lerobot-env；输入 SmolVLA 检查点和示范数据。
+# 输出与下游：输出噪声先验/采样器权重，可用于 VLA 评估或 Flow-Noise PPO。
+# 关键逻辑与边界：冻结 VLA 参数，梯度通过动作生成 ODE 传到采样器；目标是让生成动作接近示范。
+#     采样器依赖所配套的策略；更换或微调策略后，旧采样器效果需重新验证。
+
 import argparse
 import json
 import os
@@ -242,6 +249,7 @@ def train_offline(args):
         policy.config.n_action_steps = args.n_action_steps
         print(f"n_action_steps: {old} → {args.n_action_steps}")
 
+    # 固定策略参数，只优化采样器；仍需保留通过动作生成过程传回采样器的梯度。
     # Freeze VLA
     for p in policy.parameters():
         p.requires_grad = False
@@ -267,6 +275,7 @@ def train_offline(args):
     action_mean = torch.tensor(stats["action"]["mean"][:action_dim], device=device)
     action_std = torch.tensor(stats["action"]["std"][:action_dim], device=device)
 
+    # 构造有效起点，避免一个动作监督窗口跨越两条 episode。
     # Chunk and indices
     chunk_len = args.offline_chunk_len or policy.config.n_action_steps
     noise_shape = (args.batch_size, policy.config.chunk_size,

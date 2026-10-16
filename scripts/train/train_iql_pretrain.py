@@ -10,6 +10,13 @@ Usage:
         --num-steps 50000 --output outputs/iql_v1 --tracker trackio
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：独立 SAC 路线的可选离线 IQL 预训练。
+# 运行环境与输入：lerobot-env；输入带奖励的离线示范。
+# 输出与下游：同时预训练 SAC actor/critic，输出可用于 SAC 恢复的模型。
+# 关键逻辑与边界：不同于 train_iql_critics.py：后者只为 SmolVLA 加权 BC 训练价值网络。
+#     不可把这里的 SAC 权重当成 SmolVLA 或 ACT 模型。
+
 import argparse
 import json
 import os

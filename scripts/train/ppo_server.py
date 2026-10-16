@@ -8,6 +8,13 @@ Usage:
     python scripts/train/ppo_server.py --port 8081
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：在线 PPO 的模型服务端，必须与仿真客户端配合。
+# 运行环境与输入：lerobot-env；由 train_flow_noise_ppo_grpc.py 初始化模型及训练配置。
+# 输出与下游：管理 FlowNoiseSmolVLA、VIP 奖励、rollout 缓存、优势估计和 PPO 更新。
+# 关键逻辑与边界：采集时保存旧策略概率等信息，更新时用于 PPO 比率；大轨迹缓存留在服务端。
+#     单独启动服务仅等待请求，不会自行启动仿真或完成训练。
+
 import logging
 import os
 import pickle  # nosec
@@ -30,6 +37,9 @@ logger = logging.getLogger("ppo_server")
 
 # --- GAE (same as original) ---
 
+# 广义优势估计 GAE，输入是一段长度 T 的奖励、旧价值和 done。
+# 倒序计算 delta=r+gamma*V_next*(1-done)-V，再递推折扣优势。
+# returns=advantages+values 是价值网络回归目标；末步非终止时使用 last_value 引导。
 def compute_gae(
     rewards: torch.Tensor,
     values: torch.Tensor,
@@ -55,6 +65,8 @@ def compute_gae(
 
 # --- Reward normalization ---
 
+# 跨 rollout 累计奖励均值与方差，并用标准化减少奖励尺度对价值学习的影响。
+# 这是服务端的在线统计，不同于 VIPReward 自带的固定尺度归一化。
 class RunningMeanStd:
     """Welford's online algorithm for running mean/variance."""
 
@@ -92,6 +104,7 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
         # Rollout buffer (populated per-step, consumed by PPO update)
         self._reset_rollout()
 
+    # 清空本轮轨迹及旧策略统计；PPO 是按当前策略采集后更新，不是 SAC 的长期回放池。
     def _reset_rollout(self):
         self.rollout_trajectories = []
         self.rollout_vip_embs = []
@@ -105,6 +118,8 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
         logger.info(f"Client connected: {context.peer()}")
         return ppo_pb2.Empty()
 
+    # RPC 初始化：加载策略/处理器、可选噪声先验、VIP 目标、优化器和续训状态。
+    # Ready 只检查服务可连接，只有 Init 成功才表示模型完成加载。
     def Init(self, request_iterator, context):  # noqa: N802
         raw = receive_bytes_in_chunks(request_iterator)
         config = deserialize(raw)
@@ -191,6 +206,8 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
             mu_str = ", ".join(f"{v:.3f}" for v in noise_prior.mu.cpu().numpy())
             logger.info(f"Noise prior loaded: mu = [{mu_str}]")
 
+    # 处理当前观测：缓存双相机 VIP 特征、估计 V、随机采样动作。
+    # 旧概率与轨迹留在服务端，供稍后的新策略概率重计算使用。
     def SampleAction(self, request_iterator, context):  # noqa: N802
         raw = receive_bytes_in_chunks(request_iterator)
         obs = deserialize(raw)
@@ -221,6 +238,8 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
             value=float(value),
         )
 
+    # 接收动作执行后的观测，计算这次 transition 的奖励并保存 done。
+    # 调用顺序必须与 SampleAction 一一对应，否则轨迹和奖励会错位。
     def SendStepResult(self, request_iterator, context):  # noqa: N802
         raw = receive_bytes_in_chunks(request_iterator)
         payload = deserialize(raw)
@@ -229,6 +248,8 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
         sim_rewards = payload["sim_rewards"]
         done = payload["done"]
 
+        # 总奖励=vip_weight*视觉奖励+sim_weight*距离奖励+success_bonus*放置里程碑奖励。
+        # 后两项默认 0，默认训练只优化视觉接近程度，不自动等价于真实放置成功。
         # Compute combined reward (VIP on obs_next + sim rewards)
         reward = 0.0
         cfg = self.config
@@ -251,6 +272,8 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
 
         return ppo_pb2.Empty()
 
+    # 一次完整 PPO 更新：bootstrap → 奖励标准化 → GAE → 多轮小批量优化 → 清空 rollout。
+    # 返回值中的 reward_mean 是原始奖励均值，不是标准化后的训练奖励。
     def RunPPOUpdate(self, request_iterator, context):  # noqa: N802
         raw = receive_bytes_in_chunks(request_iterator)
         payload = deserialize(raw)
@@ -289,6 +312,7 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
         advantages, returns = compute_gae(
             rewards_t, values_t, dones_t, last_value, gamma, gae_lambda
         )
+        # 对本轮优势再做标准化；这与奖励标准化是两个步骤，分别影响策略与价值学习。
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Move to GPU
@@ -324,6 +348,7 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
                 new_values = self.policy.get_value_from_cached(batch_vip, batch_states)
 
                 # Value loss
+                # 价值网络拟合 GAE returns，不直接预测是否抓取成功；loss 大小依赖奖励与回报尺度。
                 value_loss = 0.5 * (new_values - returns[batch_idx]).pow(2).mean()
                 self.value_optimizer.zero_grad()
                 value_loss.backward()
@@ -333,6 +358,7 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
                 self.value_optimizer.step()
                 value_losses.append(value_loss.item())
 
+                # 预热阶段仍更新价值网络，但跳过 Actor；日志人工记录 actor_loss=0、ratio=1。
                 if is_warmup:
                     actor_losses.append(0.0)
                     ratios_all.append(torch.ones(len(batch_idx)))
@@ -359,12 +385,16 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
                         batch_log_probs.append(new_lp)
                     new_log_probs = torch.stack(batch_log_probs)
 
+                # ratio=exp(new_log_prob-old_log_prob)，必须比较同一条已采样轨迹。
+                # 冻结视觉主干并缓存前缀可减少计算；新旧概率数值不一致会直接影响 PPO 比率。
                 # PPO ratio
                 ratio = torch.exp(new_log_probs - old_log_probs_t[batch_idx])
                 adv = advantages[batch_idx]
 
                 surr1 = ratio * adv
                 surr2 = torch.clamp(ratio, 1 - clip_ratio, 1 + clip_ratio) * adv
+                # PPO 裁剪目标取两个 surrogate 的较小值，再取负数供最小化。
+                # clip_ratio 限制目标函数中的比率，不是硬限制真实策略比率始终在该区间。
                 actor_loss = -torch.min(surr1, surr2).mean()
 
                 self.actor_optimizer.zero_grad()
@@ -372,6 +402,7 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
                 torch.nn.utils.clip_grad_norm_(
                     list(self.policy.trainable_actor_params()), max_grad_norm
                 )
+                # 实际更新动作输出层和噪声头；主干仍冻结。负 actor_loss 本身不表示训练异常。
                 self.actor_optimizer.step()
 
                 actor_losses.append(actor_loss.item())
@@ -419,6 +450,8 @@ class PPOTrainingServer(ppo_pb2_grpc.PPOTrainingServicer):
         self.policy.policy.reset()
         return ppo_pb2.Empty()
 
+    # 同时保存 PPO 参数/优化器/元数据和可供标准 VLA 推理的导出模型。
+    # PPO 恢复用 flow_noise_ppo.pt，独立评估用 pretrained_model/。
     def SaveCheckpoint(self, request_iterator, context):  # noqa: N802
         raw = receive_bytes_in_chunks(request_iterator)
         payload = deserialize(raw)

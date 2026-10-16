@@ -21,6 +21,13 @@ Usage:
         --auto-server --output outputs/flow_noise_ppo_grpc_v1 --headless
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：可选在线优化：Flow-Noise PPO 的仿真客户端。
+# 运行环境与输入：isaac5.1-so-arm101；配套 lerobot-env 中的 ppo_server.py。
+# 输出与下游：循环采集 rollout、请求服务端 PPO 更新并保存检查点。
+# 关键逻辑与边界：客户端只推进仿真，服务端管理模型、视觉奖励、轨迹和梯度更新。
+#     --auto-server 依赖本机服务启动配置；不必先做 IQL，PPO 也不保证提高成功率。
+
 # Section 1: argparse + AppLauncher (before Isaac Sim init)
 import argparse
 
@@ -32,6 +39,7 @@ parser = argparse.ArgumentParser(description="PPO training for SmolVLA (gRPC spl
 parser.add_argument("--env", type=str, default="figure_shape_placement",
                     help="Task environment name")
 
+# checkpoint 是 SmolVLA 策略；iql-checkpoint 是可选 Q/V 文件，两者不能互换。
 # Policy (passed to server)
 parser.add_argument("--checkpoint", type=str, required=True,
                     help="Path to SmolVLA BC checkpoint")
@@ -52,6 +60,8 @@ parser.add_argument("--vip-weight", type=float, default=1.0)
 parser.add_argument("--sim-weight", type=float, default=0.0)
 parser.add_argument("--success-bonus", type=float, default=0.0)
 
+# rollout-steps 是每轮环境交互次数；batch-size 是优化器小批量大小。
+# reeval-batch-size 单独控制大模型概率重计算的批大小，影响显存、速度和数值一致性。
 # PPO (passed to server)
 parser.add_argument("--total-updates", type=int, default=1000)
 parser.add_argument("--rollout-steps", type=int, default=256)
@@ -81,6 +91,7 @@ parser.add_argument("--save-freq", type=int, default=50)
 parser.add_argument("--eval-freq", type=int, default=50)
 parser.add_argument("--eval-episodes", type=int, default=5)
 
+# 续训路径应包含 flow_noise_ppo.pt。total-updates 表示本次追加的轮数，而非最终总轮数。
 # Resume
 parser.add_argument("--resume", type=str, default=None)
 
@@ -125,6 +136,9 @@ from so101_lab.tasks import get_rl_task
 from so101_lab.transport.ppo_client import PPOTrainingClient
 
 
+# 评估阶段：切换到标准 SmolVLA 推理，逐条重置环境与动作队列。
+# 成功判定是本 episode 的放置里程碑奖励累计大于 0，不是 VIP 奖励阈值。
+# 成功并不立即 break；仅终止/超时退出，所以成功时平均 steps 也可能为 500。
 def evaluate(
     client: PPOTrainingClient,
     env: IsaacLabGymEnv,
@@ -168,7 +182,11 @@ def evaluate(
     }
 
 
+# 主流程：创建环境 → 初始化远端模型 → 采集 rollout → 请求 PPO 更新 → 定期评估/保存。
+# 这里不创建优化器，所有神经网络更新都在 lerobot-env 服务端执行。
 def main(args):
+    # 此处只设置客户端 Torch/NumPy 随机数，并未把 seed 传给服务端或显式写入 env_cfg.seed。
+    # 因此不能仅凭 --seed 就声称完整双进程训练完全可复现。
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     os.makedirs(args.output, exist_ok=True)
@@ -180,6 +198,7 @@ def main(args):
     # 1. Create environment
     RLEnvCfgClass = get_rl_task(args.env)
     env_cfg = RLEnvCfgClass()
+    # 当前实现固定单环境；增加 rollout 大小不等于并行启动多个仿真环境。
     env_cfg.scene.num_envs = 1
     apply_domain_rand_flags(env_cfg, args)
     env = IsaacLabGymEnv(env_cfg=env_cfg)
@@ -232,6 +251,7 @@ def main(args):
     tracker, sys_monitor = setup_tracker(args, run_name)
 
     # 6. Training info
+    # 续训从已保存轮数继续；例如已完成 100，追加 200，则目标为 300。
     total_updates = start_update + args.total_updates
     print(f"\nStarting PPO training (gRPC): {args.total_updates} updates (total {total_updates})")
     print(f"  Server: {args.server_host}:{args.server_port}")
@@ -255,13 +275,16 @@ def main(args):
     for update in pbar:
         update_t0 = time.time()
 
+        # 先用当前策略采集交互轨迹，更新所需的概率、价值和奖励由服务端管理。
         # === Rollout ===
         for step in range(args.rollout_steps):
             # Send obs → server caches VIP emb, computes value, samples action
+            # 远端保存旧策略概率、价值和去噪轨迹；客户端仅接收本步动作及少量诊断值。
             action, log_prob, value = client.sample_action(obs)
 
             # Step environment
             obs_next, _, terminated, truncated, _ = env.step(action)
+            # 当前实现把真正终止与时间截断合并；服务端 GAE 对两者都停止 bootstrap。
             done = terminated or truncated
 
             # Get sim reward details
@@ -272,6 +295,7 @@ def main(args):
             # Send obs_next → server computes VIP reward, stores transition
             client.send_step_result(obs_next, sim_rewards, done)
 
+            # 这里只是占位：真实训练奖励在服务端统计，不能用此客户端变量判断学习效果。
             ep_reward_accum += 0  # actual reward tracked on server
             ep_steps += 1
 
@@ -284,7 +308,9 @@ def main(args):
             else:
                 obs = obs_next
 
+        # 采满一段 rollout 后请求优化；warmup 阶段通过配置控制价值网络预热。
         # === PPO Update ===
+        # 预热仅训练价值网络，Actor 不更新；续训也会按本次起点重新计算预热区间。
         is_warmup = (update < start_update + args.warmup_value)
         update_config = {"is_warmup": is_warmup}
         metrics = client.run_ppo_update(obs, update_config)
@@ -320,6 +346,8 @@ def main(args):
             tracker.log(log_dict, step=update)
 
         # === Evaluation ===
+        # update 从 0 开始，打印 update 20 时实际上已经完成 21 次循环。
+        # 评估同步阻塞训练；窗口进度停留在同一数字不一定是卡死。
         if update % args.eval_freq == 0 and update > start_update:
             eval_metrics = evaluate(
                 client, env, args.eval_episodes, args.max_episode_steps,
@@ -331,6 +359,7 @@ def main(args):
             if tracker:
                 tracker.log({f"eval/{k}": v for k, v in eval_metrics.items()}, step=update)
 
+            # 仅成功率严格提高才替换 best；相同成功率不会更新 best 检查点。
             if eval_metrics["success_rate"] > best_sr:
                 best_sr = eval_metrics["success_rate"]
                 meta = {"update": update + 1, "best_sr": best_sr, "ep_count": ep_count}
@@ -357,6 +386,7 @@ def main(args):
 
     elapsed = time.time() - t_start
     print(f"\nTraining complete. {args.total_updates} updates in {elapsed / 3600:.1f}h")
+    # 未执行评估时 best_sr 仍可能为 -1，格式化成 -100%，并非真实负成功率。
     print(f"  Best success rate: {best_sr:.0%}")
     print(f"  Output: {args.output}")
 

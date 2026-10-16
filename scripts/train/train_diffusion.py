@@ -13,6 +13,13 @@ With config file:
     python scripts/train/train_diffusion.py --dataset ... --config configs/policy/diffusion/baseline.yaml
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：模仿学习分支：训练 Diffusion Policy，与 ACT 二选一或分别比较。
+# 运行环境与输入：lerobot-env；输入 --dataset 与 configs/policy/diffusion/baseline.yaml。
+# 输出与下游：输出模型、预处理器、后处理器及训练状态；交给 eval_diffusion_policy.py 评估。
+# 关键逻辑与边界：按 n_obs_steps 取历史观测，按动作 horizon 构造监督序列；训练学习去噪，
+#     推理再由噪声生成动作。不同于 ACT，本循环还维护学习率调度器。
+
 import argparse
 import json
 import time
@@ -25,7 +32,13 @@ from tqdm import tqdm
 
 from lerobot.configs.types import FeatureType
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.datasets.utils import dataset_to_policy_features
+try:
+    from lerobot.utils.feature_utils import dataset_to_policy_features
+except ModuleNotFoundError as exc:
+    if exc.name != "lerobot.utils.feature_utils":
+        raise
+    # Compatibility with older LeRobot releases.
+    from lerobot.datasets.utils import dataset_to_policy_features
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
@@ -239,6 +252,7 @@ def main():
     num_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print(f"Model parameters: {num_params:,}")
 
+    # 把历史观测窗口与未来动作窗口转换为秒，确保视频、状态和动作的时间对齐。
     # Setup delta timestamps for observation history + action horizon
     # observation.state needs n_obs_steps timestamps
     delta_timestamps = {
@@ -285,6 +299,7 @@ def main():
     # Create optimizer (diffusion uses different defaults than ACT)
     optimizer = cfg.get_optimizer_preset().build(policy.get_optim_params())
 
+    # 扩散训练随步数调整学习率；续训还需要恢复调度器状态。
     # Create LR scheduler
     scheduler_cfg = cfg.get_scheduler_preset()
     lr_scheduler = scheduler_cfg.build(optimizer, num_training_steps=args.steps)
@@ -316,6 +331,7 @@ def main():
         "n_action_steps": args.n_action_steps, "num_train_timesteps": args.num_train_timesteps,
     })
 
+    # 循环执行去噪损失、反向传播和参数更新；训练损失不能替代闭环成功率。
     # Training loop
     best_loss = float("inf")
     start_time = time.time()

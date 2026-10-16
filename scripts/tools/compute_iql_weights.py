@@ -20,6 +20,14 @@ Usage:
         --beta 1.0 --dry-run
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：SmolVLA 离线优化第三步：把 critic 估值转换为逐帧训练权重。
+# 运行环境与输入：lerobot-env；输入 --dataset、--critics，以及前一步生成的图像特征缓存。
+# 输出与下游：实际写回 Parquet 的 iql_weight 列，并更新 info.json 和 stats.json。
+# 关键逻辑与边界：代码公式是 A=min(Q1,Q2)-V，w=clip(exp(A/beta),0,max_weight)。
+#     --dry-run 只计算并打印，不写回。当前实现固定读取 data/chunk-000/file-000.parquet，
+#     不应当成通用多分片数据处理器；它不输出 iql_weights.pt。
+
 import argparse
 import json
 import os
@@ -85,6 +93,7 @@ def main():
     q2_net.eval()
     print("  Networks loaded")
 
+    # 必须使用与 critic 编码器一致且逐帧顺序一致的缓存。
     # 3. Load cached image embeddings
     encoder_type = config.get("encoder_type", "vip")
     cache_path = os.path.join(dataset_path, f"{encoder_type}_embeddings.pt")
@@ -127,6 +136,7 @@ def main():
 
     advantages = advantages.numpy()
 
+    # beta 是除数：同一优势下，较小 beta 会使权重差异更大；裁剪限制极端样本。
     # 6. Compute weights
     weights = np.exp(advantages / args.beta)
     weights = np.clip(weights, 0.0, args.max_weight)
@@ -149,6 +159,7 @@ def main():
         print("\n--dry-run: not writing to parquet")
         return
 
+    # 这里直接修改数据，不生成单独权重文件；应对奖励副本操作，dry-run 在上方提前返回。
     # 8. Write to parquet
     print(f"\nWriting iql_weight to {data_parquet}...")
     df["iql_weight"] = weights.astype(np.float32)

@@ -31,6 +31,13 @@ Controls (Isaac Sim window or eval_viewer.py):
     Escape - Quit evaluation
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：ACT 训练后的闭环评估入口。
+# 运行环境与输入：isaac5.1-so-arm101；输入 --checkpoint、--env、episode 数和种子。
+# 输出与下游：输出成功率、episode 长度等统计，并可选保存回放数据。
+# 关键逻辑与边界：加载项目独立 ACT 推理实现，不在这里进行梯度更新。每条 episode 重置策略缓存；
+#     best 是训练 loss 选择的模型，实际选型应比较多个检查点的成功率。
+
 import argparse
 import sys
 
@@ -491,6 +498,7 @@ def main():
     # Load policy
     policy = ACTInference(checkpoint_path=str(checkpoint_path), device=device)
 
+    # 控制一次预测后执行多少步再看新图像；评估对比时要固定该参数。
     # Override n_action_steps if specified
     if args.n_action_steps is not None:
         old_val = policy.config.n_action_steps
@@ -517,6 +525,7 @@ def main():
         print(f"  temporal_ensemble_coeff: {args.temporal_ensemble_coeff}")
         print(f"  ensemble_interval: {args.ensemble_interval}")
 
+    # 训练数据的时间间隔决定动作节奏，仿真控制频率不匹配会改变实际运动。
     # Check if policy_hz matches training fps
     train_config_path = checkpoint_path / "train_config.json"
     if not train_config_path.exists():

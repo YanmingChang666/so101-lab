@@ -1,15 +1,47 @@
 #!/usr/bin/env python3
-"""Train ACT policy on LeRobot dataset.
+"""在本地 LeRobot 数据集上训练 ACT（动作分块 Transformer）策略。
 
-Run in lerobot-env:
-    eval "$(./activate_lerobot.sh)"
-    python scripts/train/train_act.py --dataset data/recordings/figure_shape_placement_v1
+功能与数据流：
+    双相机图像 + 当前关节状态 → 归一化 → ACT → 未来一段目标关节位置。
+    从已有示范进行行为克隆；本脚本不启动 Isaac Sim，也不负责录制或下载。
+    数据集路径包含 meta/、data/、videos/，具体特征与统计量从元数据读取。
 
-With config file:
-    python scripts/train/train_act.py --dataset ... --config configs/policy/act.yaml
+本机使用方法（在项目根目录、lerobot-env 中运行）：
+    conda activate lerobot-env
+    env -u ALL_PROXY -u all_proxy python scripts/tools/download_demo.py --dataset easy
+    python scripts/verify_lerobot_dataset.py data/recordings/easy_task_v1
+    python scripts/train/train_act.py --dataset data/recordings/easy_task_v1 \
+        --config configs/policy/act/baseline.yaml --name act_easy_v1 \
+        --num-workers 4 --best-check-interval 100 --tracker none
 
-Config + override:
-    python scripts/train/train_act.py --dataset ... --config configs/policy/act.yaml --kl-weight 0.1
+参数：
+    优先级为命令行 > YAML > 脚本默认值。
+    baseline.yaml：60000 步、batch_size=24、lr=1e-5、chunk_size=25、
+    n_action_steps=25、kl_weight=10；每 5000 步保存定期检查点。
+    --steps 是总训练步数，不是 epoch 数；续训时也表示目标总步数。
+    --num-workers 控制数据加载进程数；显存不足时减小 --batch-size。
+    --tracker none 不使用实验跟踪服务；也支持 wandb / trackio。
+    首次创建模型可能下载 ResNet18 预训练权重。
+
+输出与续训：
+    outputs/<name>/ 保存最终模型、处理器、优化器状态及训练配置。
+    best/ 按检查时的单批训练 loss 选择，不代表最高仿真成功率。
+    checkpoint_<step>/ 是定期检查点；--resume 指向实际存在的检查点目录。
+    续训应沿用原数据与模型配置，例如追加：
+        --resume outputs/act_easy_v1/checkpoint_10000 --steps 60000
+    这会恢复模型、优化器及步数，但不是包含随机数和数据迭代位置的精确恢复。
+
+可视化与评估：
+    scripts/visualize_lerobot_rerun.py 可同步查看图像、状态、动作和奖励。
+    例如：python scripts/visualize_lerobot_rerun.py \
+        data/recordings/easy_task_v1 --episodes 0 1 2 --batch-size 100
+    可在安装 rerun-sdk 的 isaac5.1-so-arm101 环境中运行，无需启动仿真。
+    策略评估则在 Isaac 环境中运行 scripts/eval/eval_act_policy.py。
+    下载、可视化安装、完整训练及评估命令见 README_cn.md 第 11 节。
+
+兼容性：
+    新版 LeRobot 的 dataset_to_policy_features 位于 utils.feature_utils；
+    下方导入保留旧版 datasets.utils 回退，不需要为此降级 LeRobot。
 """
 
 import argparse
@@ -24,7 +56,13 @@ from torch.utils.data import DataLoader
 
 from lerobot.configs.types import FeatureType
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.datasets.utils import dataset_to_policy_features
+try:
+    from lerobot.utils.feature_utils import dataset_to_policy_features
+except ModuleNotFoundError as exc:
+    if exc.name != "lerobot.utils.feature_utils":
+        raise
+    # Compatibility with older LeRobot releases.
+    from lerobot.datasets.utils import dataset_to_policy_features
 from lerobot.policies.act.configuration_act import ACTConfig
 from lerobot.policies.act.modeling_act import ACTPolicy
 from lerobot.policies.factory import make_pre_post_processors
@@ -186,6 +224,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
+    # 读取 features 和 stats：模型输入维度与归一化统计来自数据集，不能随意更换。
     # Load dataset metadata (local dataset)
     dataset_path = Path(args.dataset).absolute()
     print(f"Loading dataset: {dataset_path}")
@@ -209,6 +248,7 @@ def main():
         kl_weight=args.kl_weight,
     )
 
+    # 创建网络与前后处理器；训练和推理必须使用同一套归一化参数。
     # Create policy and processors
     policy = ACTPolicy(cfg)
     preprocessor, postprocessor = make_pre_post_processors(cfg, dataset_stats=dataset_metadata.stats)
@@ -219,6 +259,7 @@ def main():
     num_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     print(f"Model parameters: {num_params:,}")
 
+    # 动作分块：将未来动作索引转换为秒，用于按数据集 FPS 取连续监督目标。
     # Setup delta timestamps for action chunking
     delta_timestamps = {
         "action": make_delta_timestamps(cfg.action_delta_indices, dataset_metadata.fps),
@@ -229,6 +270,7 @@ def main():
         for k in cfg.image_features
     }
 
+    # 按时间偏移读取未来动作，形成一个观测对应一段目标动作的监督样本。
     # Load dataset with delta timestamps (local dataset)
     # tolerance_s: allow 1 frame tolerance for video timestamp matching
     dataset = LeRobotDataset(
@@ -252,6 +294,7 @@ def main():
     # Create optimizer
     optimizer = cfg.get_optimizer_preset().build(policy.get_optim_params())
 
+    # 恢复模型与优化器；配置仍由本次命令构建，续训时应与原模型保持一致。
     # Resume from checkpoint
     start_step = 0
     if args.resume:
@@ -293,6 +336,7 @@ def main():
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             batch = preprocessor(batch)
 
+            # 前向计算行为克隆损失，反向传播后更新参数；这里没有读取 IQL 权重。
             # Forward + backward
             loss, loss_dict = policy.forward(batch)
             loss.backward()
@@ -319,6 +363,7 @@ def main():
                 )
                 tqdm.write(f"Saved checkpoint to {checkpoint_dir}")
 
+            # 按当前批次训练 loss 选 best，并非验证集 loss 或任务成功率。
             # Save best model
             if step % args.best_check_interval == 0 and loss.item() < best_loss:
                 best_loss = loss.item()
@@ -339,6 +384,7 @@ def main():
 
     pbar.close()
 
+    # 模型与处理器共同构成可部署检查点；只有模型文件不足以还原预处理。
     # Save final model
     total_time = time.time() - start_time
     print(f"Training complete in {int(total_time // 60)}m {int(total_time % 60)}s. Best loss: {best_loss:.4f}")

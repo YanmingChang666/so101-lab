@@ -22,6 +22,13 @@ Usage:
         --num-steps 50000 --output outputs/sac_grpc_v1 --headless
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：独立在线 RL 路线：SAC 的仿真客户端。
+# 运行环境与输入：isaac5.1-so-arm101；配套 lerobot-env 中的 sac_server.py。
+# 输出与下游：根据配置采集在线数据、处理人工干预，并请求服务端更新和保存模型。
+# 关键逻辑与边界：可结合离线数据和 IQL 预训练；奖励支持不同模式，分类器并非始终必需。
+#     SAC 不是 ACT → SmolVLA → PPO 之后必须执行的最后一步。
+
 # Section 1: argparse + AppLauncher (before Isaac Sim)
 import argparse
 import sys

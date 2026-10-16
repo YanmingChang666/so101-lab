@@ -18,6 +18,8 @@ PPO re-evaluation strategy:
   under the new distribution. No need to re-run the full ODE.
 """
 
+import inspect
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -58,6 +60,11 @@ class FlowNoiseSmolVLA:
         self.policy = policy_cls.from_pretrained(checkpoint_path)
         self.policy.to(device)
         self.policy.eval()
+        # LeRobot 新版由 past_key_values 自动判断是否填充缓存，使用 DynamicCache。
+        # 旧版使用显式 fill_kv_cache 和字典缓存，按真实接口选择，避免捕获内部 TypeError。
+        self._legacy_kv_api = "fill_kv_cache" in inspect.signature(
+            self.policy.model.vlm_with_expert.forward
+        ).parameters
 
         # Pre/post processors
         self.pre_processor = PolicyProcessorPipeline.from_pretrained(
@@ -68,6 +75,7 @@ class FlowNoiseSmolVLA:
         )
         self.image_mapping = self._build_image_key_mapping()
 
+        # 先冻结所有 SmolVLA 参数，再只解冻下方动作投影层；不进行全模型 PPO 微调。
         # 2. Freeze everything
         for p in self.policy.parameters():
             p.requires_grad = False
@@ -76,6 +84,7 @@ class FlowNoiseSmolVLA:
         for p in self.policy.model.action_out_proj.parameters():
             p.requires_grad = True
 
+        # 独立预测每个动作维度的 log 标准差；初始权重为 0、偏置 -2，对应 std≈0.135。
         # 4. Add noise_log_std_head (same dims as action_out_proj)
         expert_hidden_size = self.policy.model.vlm_with_expert.expert_hidden_size
         max_action_dim = self.policy.config.max_action_dim
@@ -83,6 +92,7 @@ class FlowNoiseSmolVLA:
         nn.init.constant_(self.noise_log_std_head.bias, -2.0)
         nn.init.zeros_(self.noise_log_std_head.weight)
 
+        # 价值网络输入是两路 VIP 特征 2048 维 + 6 维关节状态，输出单个 V(s)。
         # 5. Value head: VIP backbone (frozen) + MLP
         self.vip_backbone = VIPBackbone(device)
         self.value_mlp = self._build_value_mlp(device)
@@ -191,8 +201,41 @@ class FlowNoiseSmolVLA:
             batch[policy_key] = img
         return batch
 
+    def _forward_with_prefix_cache(self, *, fill_kv_cache, **kwargs):
+        """适配两代 LeRobot 缓存接口，对外保持逐层张量字典供 rollout 存储/批处理。
+
+        新接口的自注意力会追加 suffix；每次构造独立缓存容器并裁回 prefix，
+        避免去噪迭代或 PPO 重评估污染已保存的观测缓存。张量不经浮点转换。
+        """
+        forward = self.policy.model.vlm_with_expert.forward
+        if self._legacy_kv_api:
+            return forward(fill_kv_cache=fill_kv_cache, **kwargs)
+
+        from transformers import DynamicCache
+
+        saved = kwargs["past_key_values"]
+        cache = None
+        if saved is not None:
+            cache = DynamicCache()
+            for layer_idx, layer in saved.items():
+                cache.update(layer["key_states"], layer["value_states"], layer_idx)
+            kwargs["past_key_values"] = cache
+        try:
+            outputs, result = forward(**kwargs)
+        finally:
+            if cache is not None:
+                cache.crop(next(iter(saved.values()))["key_states"].shape[-2])
+        if result is None:
+            raise ValueError("FlowNoiseSmolVLA requires use_cache=True")
+        result_dict = {
+            i: {"key_states": layer.keys, "value_states": layer.values}
+            for i, layer in enumerate(result.layers)
+        }
+        return outputs, result_dict
+
     # --- Prefix computation (shared by sample and re-evaluate) ---
 
+    # 图像、语言和关节状态经处理器与冻结主干生成前缀 KV；同一观测的去噪步骤复用它。
     def _compute_prefix(self, obs: dict):
         """Run SmolVLA prefix (images + language + state) → KV cache.
 
@@ -219,7 +262,7 @@ class FlowNoiseSmolVLA:
             prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
             prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
-            _, past_key_values = model.vlm_with_expert.forward(
+            _, past_key_values = self._forward_with_prefix_cache(
                 attention_mask=prefix_att_2d_masks,
                 position_ids=prefix_position_ids,
                 past_key_values=None,
@@ -232,6 +275,9 @@ class FlowNoiseSmolVLA:
 
     # --- Denoise step internals ---
 
+    # 按动作噪声 x_t 和时间 t 构造后缀，结合前缀运行冻结 Transformer。
+    # 不对 Transformer 回传梯度，仅将隐藏特征交给可训练的动作投影与噪声头。
+    # 输出隐藏维度取决于实际模型；当前检查点为 720，不能依赖旧注释中的 384。
     def _get_suffix_out(self, model, prefix_pad_masks, past_key_values, x_t, timestep):
         """Run frozen expert transformer to get suffix_out (384-dim).
 
@@ -258,7 +304,7 @@ class FlowNoiseSmolVLA:
             prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
             position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
-            outputs_embeds, _ = model.vlm_with_expert.forward(
+            outputs_embeds, _ = self._forward_with_prefix_cache(
                 attention_mask=full_att_2d_masks,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
@@ -274,6 +320,9 @@ class FlowNoiseSmolVLA:
         # can compute gradients w.r.t. their own parameters
         return suffix_out.detach().requires_grad_(True)
 
+    # 仅累计动作块第 0 步、真实 6 维动作的高斯 log_prob，避免填充维度主导比率。
+    # 省略的高斯常数在新旧概率之差中抵消；这是所选去噪速度分量的概率统计，
+    # 并非对裁剪后的最终物理动作分布求精确密度。
     def _compute_gaussian_log_prob(self, v_mean, v_log_std, v_sampled):
         """Gaussian log_prob over first chunk step and real action dims only.
 
@@ -295,6 +344,8 @@ class FlowNoiseSmolVLA:
 
     # --- Main API ---
 
+    # 随机 rollout 路径：每个 ODE 步采样速度，记录 x_t/v_sampled，再 Euler 积分。
+    # 最后仅返回动作块第一步给环境；不复用整个动作队列。
     def sample_actions_with_log_prob(self, obs: dict) -> tuple[np.ndarray, torch.Tensor, dict]:
         """Sample stochastic actions from the flow matching ODE with noise injection.
 
@@ -350,6 +401,7 @@ class FlowNoiseSmolVLA:
 
             # Sample velocity
             eps = torch.randn_like(v_mean)
+            # 在速度空间加入可学习的高斯探索噪声，不是直接给最终电机角度加噪声。
             v_sampled = v_mean + v_std * eps
 
             traj_v_sampled.append(v_sampled.detach().clone())
@@ -359,6 +411,7 @@ class FlowNoiseSmolVLA:
             total_log_prob = total_log_prob + step_lp
 
             # Euler step (detach — ODE trajectory doesn't backprop)
+            # 切断 ODE 步间梯度；PPO 更新通过已保存速度的概率，不是整条轨迹端到端反传。
             x_t = x_t.detach() + dt * v_sampled.detach()
 
         # Unpad + post-process
@@ -371,6 +424,7 @@ class FlowNoiseSmolVLA:
 
         # Cache prefix KV for re-evaluation (avoids recomputing 450M prefix)
         # past_key_values is dict[int, {"key_states": tensor, "value_states": tensor}]
+        # CPU 缓存节省显存但重评估需要搬运；CUDA 缓存占用随 rollout 长度增长。
         cache_dev = self.kv_cache_device
         cached_kv = {
             layer_idx: {k: v.to(cache_dev) for k, v in layer_kv.items()}
@@ -435,6 +489,8 @@ class FlowNoiseSmolVLA:
             chunk.append(a)
         return chunk
 
+    # 用更新后的输出层对同一历史轨迹重新算概率，必须使用采集时保存的 x_t 与速度。
+    # 缓存存在时 obs 可为 None，不再重复编码原始图像。
     def reeval_log_prob(self, obs: dict, trajectory: dict) -> torch.Tensor:
         """Re-evaluate log_prob of a stored trajectory under current parameters.
 
@@ -493,6 +549,8 @@ class FlowNoiseSmolVLA:
 
         return total_log_prob.squeeze(0)  # scalar with grad
 
+    # 沿 batch 维拼接多条缓存；前缀形状必须兼容。
+    # BF16 下批大小变化可能造成新旧概率数值偏差，本机优先用 reeval-batch-size=1。
     def reeval_log_prob_batched(self, trajectories: list[dict]) -> torch.Tensor:
         """Batched re-eval: stack N trajectories, run one suffix forward with batch=N.
 
@@ -549,6 +607,9 @@ class FlowNoiseSmolVLA:
 
         return total_log_prob  # (N,) with grad
 
+    # 评估走标准 select_action 的动作队列，不调用上面的随机速度采样。
+    # 这里的 deterministic 指不使用 PPO 附加噪声头；基础流模型仍可能采样初始噪声。
+    # 执行动作块的方式与 rollout 每次只执行第一步不同，应在解释成功率时区分。
     def sample_actions_deterministic(self, obs: dict) -> np.ndarray:
         """Deterministic action selection for evaluation (standard SmolVLA inference)."""
         raw_batch = self._obs_to_raw_batch(obs)
@@ -598,6 +659,8 @@ class FlowNoiseSmolVLA:
         self.log_std_min = -5.0
         self.log_std_max = 2.0
 
+    # 基于初始检查点导出标准 SmolVLA，仅替换训练后的 action_out_proj。
+    # 噪声头和价值网络不进入标准推理模型，它们保存在 PPO 训练恢复文件中。
     def export_smolvla_checkpoint(self, output_dir: str):
         """Export a standalone SmolVLA checkpoint with updated action_out_proj.
 
@@ -666,6 +729,8 @@ class FlowNoiseSmolVLA:
 
         print(f"Saved checkpoint: {path}")
 
+    # 先构建基础 SmolVLA，再恢复 PPO 覆盖层和可选优化器。
+    # 不是精确恢复全部随机数、仿真状态和 rollout 中间位置。
     def load_checkpoint(self, path: str, optimizers: dict | None = None) -> dict:
         """Load trainable parameters and optimizer state. Returns metadata dict."""
         import os

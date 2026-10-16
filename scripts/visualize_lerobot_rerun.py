@@ -32,6 +32,13 @@ Usage:
     python scripts/visualize_lerobot_rerun.py data/recordings/dataset --batch-size=500
 """
 
+# 中文流程说明（完整顺序见 docs/workflow/training_pipeline_cn.md）
+# 定位：数据质量检查：同步回放双相机画面与关节曲线。
+# 运行环境与输入：独立 Rerun 环境，或装有 rerun-sdk 的 isaac5.1-so-arm101。
+# 输出与下游：输入数据集目录；默认打开窗口，--save 则输出 .rrd 文件。
+# 关键逻辑与边界：--episodes 0 1 2 使用空格分隔；--batch-size 是视频缓存，不是训练批大小。
+#     不启动 Isaac Sim、不训练策略；--downsample 可减少显示帧数。
+
 import argparse
 import io
 import json
@@ -42,6 +49,18 @@ import numpy as np
 import pandas as pd
 import rerun as rr
 from PIL import Image
+
+# Isaac Sim 5.1 固定 NumPy 1.26，因此该环境使用支持 NumPy 1.x 的 Rerun 0.22。
+# 独立可视化环境可使用新版 Rerun；这里同时兼容两套时间轴和标量 API。
+RERUN_SCALAR = rr.Scalars if hasattr(rr, "Scalars") else rr.Scalar
+
+
+def set_frame_time(timeline: str, frame: int) -> None:
+    if hasattr(rr, "set_time"):
+        rr.set_time(timeline, sequence=frame)
+    else:
+        rr.set_time_sequence(timeline, frame)
+
 
 SO101_JOINT_NAMES = [
     "shoulder_pan",
@@ -282,11 +301,11 @@ def visualize_dataset(
             row = df.iloc[local_frame]
 
             # Set timelines
-            rr.set_time("frame", sequence=global_frame)
-            rr.set_time("episode_frame", sequence=local_frame)
+            set_frame_time("frame", global_frame)
+            set_frame_time("episode_frame", local_frame)
 
             # Log episode index and task
-            rr.log("episode/index", rr.Scalars(ep_idx))
+            rr.log("episode/index", RERUN_SCALAR(ep_idx))
             rr.log("episode/task", rr.TextDocument(task_name))
 
             # Log images (use video file index and frame offset)
@@ -320,11 +339,11 @@ def visualize_dataset(
             action = np.array(row["action"])
 
             for j, joint_name in enumerate(SO101_JOINT_NAMES):
-                rr.log(f"robot/state/{joint_name}", rr.Scalars(state[j]))
-                rr.log(f"robot/action/{joint_name}", rr.Scalars(action[j]))
+                rr.log(f"robot/state/{joint_name}", RERUN_SCALAR(state[j]))
+                rr.log(f"robot/action/{joint_name}", RERUN_SCALAR(action[j]))
 
             if "next.reward" in row.index:
-                rr.log("reward", rr.Scalars(float(row["next.reward"])))
+                rr.log("reward", RERUN_SCALAR(float(row["next.reward"])))
 
             global_frame += 1
 
